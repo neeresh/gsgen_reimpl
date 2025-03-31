@@ -1,0 +1,7 @@
+setup.py
+/home/cis/Documents/DiffusionModels/gsgen/gs/src/bindings.cpp
+/home/cis/Documents/DiffusionModels/gsgen/gs/src/render.cu
+gs.egg-info/PKG-INFO
+gs.egg-info/SOURCES.txt
+gs.egg-info/dependency_links.txt
+gs.egg-info/top_level.txt
