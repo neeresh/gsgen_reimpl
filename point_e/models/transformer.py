@@ -126,8 +126,9 @@ class Transformer(nn.Module):
 class PointDiffusionTransformer(nn.Module):
 
     """
-    The PointDiffusionTransformer is a transformer-based model used in the Point-E project, where the goal is to
-    generate 3D point clouds via diffusion models. It takes a tensor representing a sequence of point features and
+    The PointDiffusionTransformer is a transformer-based model used in the Point-E project.
+    The goal is to generate 3D point clouds via diffusion models.
+    It takes a tensor representing a sequence of point features and
     predicts another tensor of the same shape — essentially learning how points in a cloud evolve over time (timesteps)
     """
 
@@ -164,20 +165,41 @@ class PointDiffusionTransformer(nn.Module):
             Example: For a batch of 4 point clouds, each with 3D coordinates and 1024 points: x.shape = (4, 3, 1024)
 
         :param t: an [N] tensor.
+        A scalar timestep for each sample in the batch, representing the current point in the diffusion process.
 
         :return: an [N x C' x T] tensor.
+
+        x.shape = [4, 3, 1024]
+        t.shape = [4]
+
+        -> t_embed: [4, 512]
+        -> input_proj(x): [4, 1024, 512]
+        -> +t_embed: [4, 1024, 512]
+        -> backbone: [4, 1024, 512]
+        -> output_proj: [4, 1024, 3]
+        -> permute: [4, 3, 1024]
         """
         assert x.shape[-1] == self.n_ctx
 
         t_embed = self.time_embed(timestep_embedding(t, self.backbone.width))
 
+        # self.time_token_cond is a boolean:
+        # If True, the time embedding is added as an extra token;
+        # If False, it is added directly to each input token via broadcasting.
+
         return self._forward_with_cond(x, [(t_embed, self.time_token_cond)])
 
     def _forward_with_cond(self, x: torch.Tensor, cond_as_token: List[Tuple[torch.Tensor, bool]]) -> torch.Tensor:
 
+        # Transposes x from [N, C, T] to [N, T, C], then projects each token (point) from C to width dimensions.
         h = self.input_proj(x.permute(0, 2, 1))  # NCL -> NLC
 
+        # h.shape is now [N, T, width].
+
         for emb, as_token in cond_as_token:
+            # Depending on as_token:
+            # If False: Adds t_embed to each token → [N, T, width]
+            # If True: Prepends it as a token → [N, T+1, width]
             if not as_token:
                 h = h + emb[:, None]
 
@@ -190,15 +212,23 @@ class PointDiffusionTransformer(nn.Module):
         if len(extra_tokens):
             h = torch.cat(extra_tokens + [h], dim=1)
 
+        # [N, T, width]
         h = self.ln_pre(h)
+
+        # [N, T, width]
         h = self.backbone(h)
+
+        # [N, T, width]
         h = self.ln_post(h)
 
+        # If a time token was added as a prepended token, it's now removed before projecting the output.
         if len(extra_tokens):
             h = h[:, sum(h.shape[1] for h in extra_tokens):]
 
+        # [N, T, output_channels]
         h = self.output_proj(h)
 
+        # [N, output_channels, T]
         return h.permute(0, 2, 1)
 
 
