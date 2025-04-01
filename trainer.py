@@ -4,6 +4,7 @@ from tqdm import tqdm
 from data import CameraPoseProvider
 from data.sit3d import SingleViewCameraPoseProvider
 from gs.gaussian_splatting import GaussianSplattingRenderer
+from utils.initialize import initialize
 
 
 class Trainer(nn.Module):

@@ -1,6 +1,6 @@
 import torch
 
-from point_e.models.config import MODEL_CONFIGS
+from point_e.models.config import MODEL_CONFIGS, model_from_config
 
 
 def point_e_generate_pcd_from_text(text, num_points=4096):
@@ -10,6 +10,9 @@ def point_e_generate_pcd_from_text(text, num_points=4096):
     print("Creating Base Model...")
     base_name = "base40M-textvec"
     base_model = model_from_config(MODEL_CONFIGS[base_name], device)
+    base_model.eval()
+
+    base_diffusion = diffusion_from_config(MODEL_CONFIGS[base_name], device)
 
 
 

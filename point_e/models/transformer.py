@@ -1,10 +1,11 @@
 import math
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Iterable, Any, Dict
 
 import torch
 from torch import nn
 
 from point_e.models.checkpoint import checkpoint
+from point_e.models.pretrained_clip import FrozenImageCLIP, ImageCLIP, ImageType
 from point_e.models.util import timestep_embedding
 
 
@@ -124,7 +125,6 @@ class Transformer(nn.Module):
 
 
 class PointDiffusionTransformer(nn.Module):
-
     """
     The PointDiffusionTransformer is a transformer-based model used in the Point-E project.
     The goal is to generate 3D point clouds via diffusion models.
@@ -196,6 +196,7 @@ class PointDiffusionTransformer(nn.Module):
 
         # h.shape is now [N, T, width].
 
+        # Inject conditioning
         for emb, as_token in cond_as_token:
             # Depending on as_token:
             # If False: Adds t_embed to each token → [N, T, width]
@@ -233,4 +234,96 @@ class PointDiffusionTransformer(nn.Module):
 
 
 class CLIPImagePointDiffusionTransformer(PointDiffusionTransformer):
-    pass
+    """
+    It’s a conditional diffusion transformer designed to generate 3D point clouds, where the conditioning comes from
+    CLIP embeddings (text, image, or both).
+
+    This model is built on top of:
+        A Transformer-based denoising model (PointDiffusionTransformer)
+        A CLIP encoder (frozen or trainable)
+        Optional conditioning mechanisms via token injection or addition
+
+    x: Tensor[N, C, T]          -> Point cloud: batch of N, with T points, each C-dimensional (like XYZ)
+    t: Tensor[N]                -> Diffusion timestep per sample
+    texts / images / embeddings -> Conditioning inputs (one modality per sample)
+
+    """
+
+    def __init__(self, *, device: torch.device, dtype: torch.dtype, n_ctx: int = 1024,
+                 token_cond: bool = False, cond_drop_prob: float = 0.0, frozen_clip: bool = True,
+                 cache_dir: Optional[str] = None, **kwargs, ):
+        super().__init__(device=device, dtype=dtype, n_ctx=n_ctx + int(token_cond), **kwargs)
+        self.n_ctx = n_ctx
+        self.token_cond = token_cond
+
+        # CLIP encoder (frozen or trainable)
+        self.clip = (FrozenImageCLIP if frozen_clip else ImageCLIP)(device=device, cache_dir=cache_dir)
+
+        self.clip_embed = nn.Linear(self.clip.feature_dim, self.backbone.width, device=device, dtype=dtype)
+        self.cond_drop_prob = cond_drop_prob
+
+    def cached_model_kwargs(self, batch_size: int, model_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        with torch.no_grad():
+            return dict(embeddings=self.clip(batch_size, **model_kwargs))
+
+    def forward(self, x: torch.Tensor, t: torch.Tensor, images: Optional[Iterable[Optional[ImageType]]] = None,
+                texts: Optional[Iterable[Optional[str]]] = None,
+                embeddings: Optional[Iterable[Optional[torch.Tensor]]] = None, ):
+        """
+        :param x: an [N x C x T] tensor.
+        :param t: an [N] tensor.
+        :param images: a batch of images to condition on.
+        :param texts: a batch of texts to condition on.
+        :param embeddings: a batch of CLIP embeddings to condition on.
+        :return: an [N x C' x T] tensor.
+        """
+        assert x.shape[-1] == self.n_ctx
+
+        t_embed = self.time_embed(timestep_embedding(t, self.backbone.width))
+
+        # multi-modal conditional guidance — super useful in generative tasks like text-to-3D or image-to-3D
+        clip_out = self.clip(batch_size=len(x), images=images, texts=texts, embeddings=embeddings)  # [N, D]
+
+        assert len(clip_out.shape) == 2 and clip_out.shape[0] == x.shape[0]
+
+        if self.training:
+            # Randomly masks out conditioning info for some samples (controlled by cond_drop_prob)
+            # Helps the model become robust to missing guidance
+            mask = torch.rand(size=[len(x)]) >= self.cond_drop_prob
+            clip_out = clip_out * mask[:, None].to(clip_out)
+
+        # Rescale the features to have unit variance
+        clip_out = math.sqrt(clip_out.shape[1]) * clip_out
+
+        clip_embed = self.clip_embed(clip_out)
+
+        # Each conditioning embedding (time + CLIP) is either:
+        # Added to every token (broadcasting), if as_token=False
+        # Prepended as a new token, if as_token=True
+        cond = [(clip_embed, self.token_cond), (t_embed, self.time_token_cond)]
+
+        return self._forward_with_cond(x, cond)
+
+
+if __name__ == "__main__":
+
+    import torch
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model = CLIPImagePointDiffusionTransformer(device=device, dtype=torch.float32, input_channels=3,
+                                               output_channels=3, n_ctx=1024, width=512, layers=12, heads=8,
+                                               token_cond=True, time_token_cond=False, cond_drop_prob=0.1,
+                                               frozen_clip=True, )
+
+    print(model)
+
+    x = torch.randn(4, 3, 1024)  # batch of 4 point clouds
+    t = torch.randint(low=0, high=1000, size=(4,))
+    texts = ["a red car", "a spaceship", None, "a chair"]
+
+    out = model(x=x.to(device), t=t.to(device), texts=texts)
+
+    print(out.shape)  # Should be [4, 3, 1024]
+
+
